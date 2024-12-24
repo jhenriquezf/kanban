@@ -29,6 +29,23 @@ class NotaVenta(models.Model):
     def clean(self):
             if self.tipo_venta == 'CONSIGNACION' and not self.bodega_destino:
                 raise ValidationError("Debe especificar una bodega de destino para ventas por consignación.")
+    
+    def actualizar_estado(self):
+        if not self.pk:
+            return
+
+        lineas = self.lineas.all()
+        if all(linea.estado == 'CONSUMIDA' or linea.estado == 'ENTREGADA' for linea in lineas):
+            self.estado = 'FINALIZADA'
+        elif any(linea.estado in ['EN_TRANSITO', 'ENTREGADA'] for linea in lineas):
+            self.estado = 'EN_PROCESO'
+        else:
+            self.estado = 'CREADA'
+
+    def save(self, *args, **kwargs):
+        if self.pk:
+            self.actualizar_estado()
+        super().save(*args, **kwargs)
 
 class LineaNotaVenta(models.Model):
     ESTADOS_LINEA = [
@@ -53,3 +70,17 @@ class LineaNotaVenta(models.Model):
             raise ValidationError("La cantidad entregada no puede ser mayor que la cantidad solicitada.")
         if self.cantidad_recibida_o_consumida > self.cantidad_entregada:
             raise ValidationError("La cantidad recibida o consumida no puede ser mayor que la cantidad entregada.")
+    
+    def actualizar_estado(self):
+        if self.cantidad_entregada < self.cantidad_solicitada:
+            self.estado = 'PENDIENTE'
+        elif self.cantidad_entregada >= self.cantidad_solicitada and self.cantidad_recibida_o_consumida == 0:
+            self.estado = 'EN_TRANSITO'
+        elif self.cantidad_recibida_o_consumida < self.cantidad_solicitada:
+            self.estado = 'ENTREGADA'
+        elif self.cantidad_recibida_o_consumida >= self.cantidad_solicitada:
+            self.estado = 'CONSUMIDA'
+
+    def save(self, *args, **kwargs):
+        self.actualizar_estado()
+        super().save(*args, **kwargs)

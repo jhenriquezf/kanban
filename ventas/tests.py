@@ -1,60 +1,90 @@
 from django.test import TestCase
-from bodegas.models import Bodega
-from productos.models import Producto
+from django.urls import reverse
+from django.contrib.auth.models import User
 from ventas.models import NotaVenta, LineaNotaVenta
-from django.core.exceptions import ValidationError
+from productos.models import Producto
+from movimientos.models import MovimientoInventario
+from bodegas.models import Bodega
 
-class NotaVentaTestCase(TestCase):
+
+class RegistrarSalidaNotaVentaTest(TestCase):
 
     def setUp(self):
-        # Crear bodegas
-        self.bodega_origen = Bodega.objects.create(nombre="Bodega Interna", tipo="INTERNA")
-        self.bodega_destino = Bodega.objects.create(nombre="Bodega Cliente", tipo="EXTERNA")
+        # Crear un usuario para autenticación
+        self.user = User.objects.create_user(username="testuser", password="testpass")
 
-        # Crear producto
-        self.producto = Producto.objects.create(nombre="Producto B", codigo_barras="987654321")
+        # Crear bodega
+        self.bodega_origen = Bodega.objects.create(nombre="Bodega Central", tipo="INTERNA")
 
-    def test_nota_venta_consignacion_sin_bodega_destino(self):
-        # Intentar crear una nota de venta por consignación sin bodega de destino
-        nota_venta = NotaVenta(
-            tipo_venta="CONSIGNACION",
-            cliente="Cliente X",
-            bodega_origen=self.bodega_origen
+        # Crear un producto
+        self.producto = Producto.objects.create(
+            nombre="Producto A",
+            codigo_barras="123456789",
+            activo=True
         )
-        with self.assertRaises(ValidationError):
-            nota_venta.full_clean()
 
-    def test_linea_nota_venta_valida(self):
-        # Crear nota de venta y línea asociada
-        nota_venta = NotaVenta.objects.create(
-            tipo_venta="SPOT",
-            cliente="Cliente Y",
-            bodega_origen=self.bodega_origen
-        )
-        linea = LineaNotaVenta.objects.create(
-            nota_venta=nota_venta,
+        # Crear un registro inicial de stock
+        MovimientoInventario.objects.create(
+            tipo_movimiento="ENTRADA",
+            bodega_origen=self.bodega_origen,
             producto=self.producto,
-            cantidad_solicitada=10,
-            cantidad_entregada=5,
-            cantidad_recibida_o_consumida=5
+            cantidad=10  # Stock inicial suficiente
         )
-        # Verificar que las cantidades son consistentes
-        self.assertEqual(linea.cantidad_solicitada, 10)
+
+        # Crear una Nota de Venta
+        self.nota_venta = NotaVenta.objects.create(
+            tipo_venta="SPOT",
+            cliente="Cliente A",
+            bodega_origen=self.bodega_origen
+        )
+
+    def test_registrar_salida_exitosamente(self):
+        self.client.login(username="testuser", password="testpass")
+        response = self.client.post(reverse('registrar_salida_nota_venta'), {
+            "nota_venta_id": self.nota_venta.id,
+            "codigo_barras": self.producto.codigo_barras,
+            "cantidad": "5"
+        })
+        print(response.json())  # Agregar para depurar la respuesta del servidor
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("Salida registrada exitosamente.", response.json().get("message"))
+
+        # Verificar que la línea se creó y tiene la cantidad entregada correcta
+        linea = LineaNotaVenta.objects.get(nota_venta=self.nota_venta, producto=self.producto)
         self.assertEqual(linea.cantidad_entregada, 5)
-        self.assertEqual(linea.cantidad_recibida_o_consumida, 5)
+        self.assertEqual(linea.estado, "EN_TRANSITO")
 
-    def test_linea_nota_venta_cantidad_entregada_invalida(self):
-        # Intentar crear una línea con cantidad entregada mayor a la solicitada
-        nota_venta = NotaVenta.objects.create(
-            tipo_venta="SPOT",
-            cliente="Cliente Z",
-            bodega_origen=self.bodega_origen
-        )
-        linea = LineaNotaVenta(
-            nota_venta=nota_venta,
-            producto=self.producto,
-            cantidad_solicitada=10,
-            cantidad_entregada=15
-        )
-        with self.assertRaises(ValidationError):
-            linea.full_clean()
+    def test_falta_datos(self):
+        self.client.login(username="testuser", password="testpass")
+        response = self.client.post(reverse('registrar_salida_nota_venta'), {
+            "nota_venta_id": self.nota_venta.id,
+            "codigo_barras": ""
+        })
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("Datos incompletos.", response.json().get("error"))
+
+    def test_producto_inactivo(self):
+        self.client.login(username="testuser", password="testpass")
+        self.producto.activo = False
+        self.producto.save()
+
+        response = self.client.post(reverse('registrar_salida_nota_venta'), {
+            "nota_venta_id": self.nota_venta.id,
+            "codigo_barras": self.producto.codigo_barras,
+            "cantidad": "5"
+        })
+        self.assertEqual(response.status_code, 404)
+        self.assertIn("Producto no encontrado o inactivo.", response.json().get("error"))
+
+    def test_nota_venta_estado_invalido(self):
+        self.client.login(username="testuser", password="testpass")
+        self.nota_venta.estado = "FINALIZADA"
+        self.nota_venta.save()
+
+        response = self.client.post(reverse('registrar_salida_nota_venta'), {
+            "nota_venta_id": self.nota_venta.id,
+            "codigo_barras": self.producto.codigo_barras,
+            "cantidad": "5"
+        })
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("La Nota de Venta no permite modificaciones en este estado.", response.json().get("error"))

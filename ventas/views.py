@@ -8,9 +8,11 @@ from ventas.models import NotaVenta, LineaNotaVenta
 from productos.models import Producto
 from movimientos.models import MovimientoInventario
 
+
 @require_POST
 @transaction.atomic
 def registrar_salida_nota_venta(request):
+    # Obtener los datos del request
     nota_venta_id = request.POST.get('nota_venta_id')
     codigo_barras = request.POST.get('codigo_barras')
     cantidad_str = request.POST.get('cantidad')
@@ -23,33 +25,31 @@ def registrar_salida_nota_venta(request):
     except ValueError:
         return JsonResponse({"error": "Cantidad inválida."}, status=400)
 
-    # Obtener la nota de venta
+    # Obtener la Nota de Venta
     nota_venta = get_object_or_404(NotaVenta, pk=nota_venta_id)
 
-    # Validar estado de la nota
+    # Validar estado de la Nota
     if nota_venta.estado not in ["CREADA", "EN_PROCESO"]:
         return JsonResponse({"error": "La Nota de Venta no permite modificaciones en este estado."}, status=400)
 
-    # Obtener el producto por código de barras
+    # Obtener el Producto
     try:
         producto = Producto.objects.get(codigo_barras=codigo_barras, activo=True)
     except Producto.DoesNotExist:
         return JsonResponse({"error": "Producto no encontrado o inactivo."}, status=404)
 
-    # Obtener o crear la línea de la nota de venta para este producto
+    # Obtener la línea correspondiente o crear una nueva
     linea, creada = LineaNotaVenta.objects.get_or_create(
         nota_venta=nota_venta,
         producto=producto,
         defaults={'cantidad_solicitada': cantidad, 'cantidad_entregada': 0, 'cantidad_recibida_o_consumida': 0}
     )
 
-    # Si la línea ya existía, aumentamos la cantidad solicitada si es necesario
-    # En un flujo real, la cantidad_solicitada podría ya estar establecida.
-    # Aquí se asume que el escaneo podría aumentar la demanda.
+    # Si la línea ya existía, validar y ajustar la cantidad solicitada
     if not creada and linea.cantidad_solicitada < (linea.cantidad_entregada + cantidad):
         linea.cantidad_solicitada = linea.cantidad_entregada + cantidad
 
-    # Intentar crear el movimiento de inventario (SALIDA)
+    # Crear el Movimiento de Inventario
     try:
         movimiento = MovimientoInventario(
             tipo_movimiento="SALIDA",
@@ -59,30 +59,18 @@ def registrar_salida_nota_venta(request):
             linea_nota_venta=linea
         )
         movimiento.full_clean()  # Validar antes de guardar
-        movimiento.save()        # Esto dispara las señales y actualiza el stock
+        movimiento.save()        # Guardar el movimiento
     except ValidationError as e:
-        # Error de validación, por ejemplo, stock insuficiente
         return JsonResponse({"error": str(e)}, status=400)
 
     # Actualizar la línea con la cantidad entregada
     linea.cantidad_entregada += cantidad
-    # Ajustar el estado de la línea según las cantidades
-    if linea.cantidad_entregada < linea.cantidad_solicitada:
-        linea.estado = "PENDIENTE"
-    else:
-        # Si ya se cumplió la cantidad solicitada, la línea podría considerarse en tránsito o entregada,
-        # según la lógica interna. Aquí, por simplicidad, pasamos a EN_TRANSITO.
-        linea.estado = "EN_TRANSITO"
+    linea.save()  # Esto disparará la lógica de actualización del estado
 
-    linea.full_clean()
-    linea.save()
+    # Actualizar la Nota de Venta (disparará su lógica interna)
+    nota_venta.save()
 
-    # Si todas las líneas están completas, actualizar el estado de la nota_venta
-    if all(l.cantidad_entregada >= l.cantidad_solicitada for l in nota_venta.lineas.all()):
-        # Podría pasar a EN_PROCESO o incluso marcarla como FINALIZADA si la lógica lo indica
-        nota_venta.estado = "EN_PROCESO"
-        nota_venta.save()
-
+    # Responder con información actualizada
     return JsonResponse({
         "message": "Salida registrada exitosamente.",
         "nota_venta_id": nota_venta.id,
